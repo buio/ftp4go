@@ -625,8 +625,6 @@ func (ftp *FTP) GetBytes(cmd FtpCmd, writer io.Writer, blocksize int, params ...
 // GetBytesProgress retrieves data in binary mode with progress channel
 // Args:
 //        cmd: A RETR command.
-//        callback: A single parameter callable to be called on each
-//                  block of data read.
 //        blocksize: The maximum number of bytes to read from the
 //                  socket at one time.  [default: 8192]
 //
