@@ -22,6 +22,7 @@ var allpars = []*connPars{
 	&connPars{ftpAddress: "ftp.drivehq.com", ftpPort: 21, username: "goftptest", password: "g0ftpt3st", homefolder: "/publicFolder", debugFtp: false},
 	&connPars{ftpAddress: "ftp.fileserve.com", ftpPort: 21, username: "ftp4go", password: "52fe56bc", homefolder: "/", debugFtp: true},
 	&connPars{ftpAddress: "www.0catch.com", ftpPort: 21, username: "ftp4go.0catch.com", password: "g0ftpt3st", homefolder: "/", debugFtp: true},
+	&connPars{ftpAddress: "speedtest.tele2.net", ftpPort: 21, username: "", password: "", homefolder: "/", debugFtp: false},
 }
 
 var pars = allpars[0]
@@ -118,6 +119,7 @@ func _TestServerAsciiMode(t *testing.T) {
 	}
 
 }
+
 
 func TestFeatures(t *testing.T) {
 
@@ -425,4 +427,109 @@ func startStats() (stats chan *CallbackInfo, fileUploaded chan bool, quit chan b
 		}
 	}()
 	return
+}
+
+func TestResume(t *testing.T) {
+	pars = allpars[3]
+	ftpClient, err := NewFtpConn(t)
+	defer ftpClient.Quit()
+
+	if err != nil {
+		return
+	}
+	file_remote := "500MB.zip"
+	file_local := "test/test.zip"
+	ftpClient.TimeoutInMsec = 200;
+	
+	ftpClient.Binary();
+	size, _ := ftpClient.Size(file_remote);
+	fmt.Println("Size is:", size);
+	progresschan, err := ftpClient.ResumeDownload(file_remote, file_local)
+	if err != nil {
+		return
+	}
+	acc := 0;
+	oldperc := -1;
+	for {
+		n := <-progresschan
+		
+		if n == -1 {
+			fmt.Println("error during download")
+			return
+		}
+		if n == -2 {
+			fmt.Println("Download completed");
+			return
+		}
+		
+		acc += n
+		perc := (acc * 100) / size;
+		if perc != oldperc {
+			fmt.Println("Current", perc, "%",acc," - riceved", n, "bytes");
+			oldperc = perc;
+		}
+		
+	}
+}
+
+func TestForceDownload(t *testing.T){
+	pars = allpars[3]
+	ftpClient, err := NewFtpConn(t)
+
+	if err != nil {
+		return
+	}
+	file_remote := "500MB.zip"
+	file_local := "test/test.zip"
+	max_tries := 100;
+	sleep_time := 1 * time.Second;
+	timeout_ms := 53;
+	
+	ftpClient.Binary();
+	size, _ := ftpClient.Size(file_remote);
+	fmt.Println("Size is:", size);
+	ftpClient.Quit()
+	os.Remove(file_local);
+	completed := false;
+	
+	for i:=0; i<max_tries && !completed;i++ {
+		ftpClient.Quit();
+		
+		ftpClient, err = NewFtpConn(t)
+		if err != nil {
+			return
+		}
+		ftpClient.TimeoutInMsec = timeout_ms;
+		
+		progresschan, err := ftpClient.ResumeDownload(file_remote, file_local)
+		if err != nil {
+			fmt.Println(err);
+			time.Sleep(sleep_time);
+			continue
+		}
+		acc := 0;
+		oldperc := -1;
+		for {
+			n := <-progresschan
+			if n == -2 {
+				completed = true
+				break
+			}
+			if n == -1 {
+				time.Sleep(sleep_time);
+				break;
+			}
+			acc += n
+			perc := (acc * 100) / size;
+			if perc != oldperc {
+				fmt.Println("Current", perc, "%",acc," - riceved", n, "bytes");
+				oldperc = perc;
+			}
+			
+		}
+	}
+	
+	if completed {
+		fmt.Println("Download succesfully completed!");
+	}
 }

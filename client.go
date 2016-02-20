@@ -3,7 +3,7 @@ package ftp4go
 
 import (
 	"bufio"
-	"code.google.com/p/go.net/proxy"
+	"golang.org/x/net/proxy"
 	"errors"
 	"fmt"
 	"io"
@@ -55,6 +55,7 @@ const (
 	CDUP_FTP_CMD       FtpCmd = 23
 	QUIT_FTP_CMD       FtpCmd = 24
 	MLSD_FTP_CMD       FtpCmd = 25
+	REST_FTP_CMD       FtpCmd = 26
 )
 
 const MSG_OOB = 0x1 //Process data out of band
@@ -86,6 +87,7 @@ var ftpCmdStrings = map[FtpCmd]string{
 	PWDIR_FTP_CMD:      "PWD",
 	CDUP_FTP_CMD:       "CDUP",
 	QUIT_FTP_CMD:       "QUIT",
+	REST_FTP_CMD:       "REST",
 }
 
 // The FTP client structure containing:
@@ -98,7 +100,7 @@ type FTP struct {
 	welcome       string
 	passiveserver bool
 	logger        *log.Logger
-	//timeoutInMsec int64
+	TimeoutInMsec int
 	textprotoConn *textproto.Conn
 	dialer        proxy.Dialer
 	conn          net.Conn
@@ -110,7 +112,7 @@ type NameFactsLine struct {
 	Facts map[string]string
 }
 
-func getTimeoutInMsec(msec int64) time.Time {
+func getTimeoutInMsec(msec int) time.Time {
 	return time.Now().Add(time.Duration(msec) * time.Millisecond)
 }
 
@@ -154,7 +156,7 @@ func NewFTP(debuglevel int) *FTP {
 		debugging: debuglevel,
 		Port:      DefaultFtpPort,
 		logger:    logger,
-		//timeoutInMsec: DefaultTimeoutInMsec,
+		TimeoutInMsec: DefaultTimeoutInMsec,
 		passiveserver: true,
 	}
 	return ftp
@@ -400,7 +402,7 @@ func (ftp *FTP) Cwd(dirname string) (response *Response, err error) {
 func (ftp *FTP) Size(filename string) (size int, err error) {
 	response, err := ftp.SendAndRead(SIZE_FTP_CMD, filename)
 	if response.Code == 213 {
-		size, _ = strconv.Atoi(strings.TrimSpace(response.Message[3:]))
+		size, _ = strconv.Atoi(strings.TrimSpace(response.Message))
 		return size, err
 	}
 	return
@@ -620,6 +622,66 @@ func (ftp *FTP) GetBytes(cmd FtpCmd, writer io.Writer, blocksize int, params ...
 	return
 }
 
+// GetBytesProgress retrieves data in binary mode with progress channel
+// Args:
+//        cmd: A RETR command.
+//        callback: A single parameter callable to be called on each
+//                  block of data read.
+//        blocksize: The maximum number of bytes to read from the
+//                  socket at one time.  [default: 8192]
+//
+//Returns:
+//        The response code.
+func (ftp *FTP) GetBytesProgress(cmd FtpCmd, writer io.Writer, blocksize int, progresschan chan int, params ...string) (err error) {
+	var conn net.Conn
+	if _, err = ftp.SendAndRead(TYPE_I_FTP_CMD); err != nil {
+		return
+	}
+
+	// wrap this code up to guarantee the connection disposal via a defer
+	separateCall := func() error {
+		if conn, _, err = ftp.transferCmd(cmd, params...); err != nil {
+			return err
+		}
+		defer conn.Close() // close the connection on exit
+
+		bufReader := bufio.NewReaderSize(conn, blocksize)
+
+		ftp.writeInfo("Try and get bytes via connection for remote address:", conn.RemoteAddr().String())
+
+		s := make([]byte, blocksize)
+		var n int
+		defer conn.SetDeadline(time.Time{});
+		for {
+			
+			conn.SetDeadline(getTimeoutInMsec(ftp.TimeoutInMsec));
+			n, err = bufReader.Read(s)
+			ftp.writeInfo("GETBYTES: Number of bytes read:", n)
+			if _, err1 := writer.Write(s[:n]); err1 != nil {
+				return err1
+			}
+			progresschan <- n
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+
+		}
+
+		return nil
+	}
+
+	if err := separateCall(); err != nil {
+		return err
+	}
+
+	_, err = ftp.Read(cmd)
+	return
+}
+
+
 // StoreLines stores a file in line mode.
 //
 //      Args:
@@ -750,6 +812,55 @@ func (ftp *FTP) StoreBytes(cmd FtpCmd, reader io.Reader, blocksize int, remotena
 	return
 }
 
+//Set binary mode
+func (ftp *FTP) Binary() error {
+	if _, err := ftp.SendAndRead(TYPE_I_FTP_CMD); err != nil {
+		return err
+	}
+	return nil
+}
+
+//Resume download that was interrupted before. It does not check if the remote file has changed. 
+func (ftp *FTP) ResumeDownload(remotename string, localpath string) (progresschan chan int, err error) {
+
+	ftp.Binary();
+	var f *os.File
+	f, err = os.OpenFile(localpath, os.O_WRONLY|os.O_CREATE, 0644)
+	
+	if err != nil {
+		return
+	}
+	
+	ret, err := f.Seek(0,2);
+	
+	if err != nil {
+		return
+	}
+	
+	if ret > 0 {
+		if _, err = ftp.SendAndRead(REST_FTP_CMD, fmt.Sprintf("%d", ret)); err != nil {
+			return 
+		}
+		ftp.writeInfo("Resuming download from", ret)		
+		
+	}
+	progresschan = make(chan int, 10);
+	if ret > 0 {
+		progresschan<-int(ret)
+	}
+	go func(f *os.File){
+		defer f.Close()
+		if err = ftp.GetBytesProgress(RETR_FTP_CMD, f, BLOCK_SIZE, progresschan, remotename); err != nil {
+			fmt.Println(err);
+			progresschan <- -1
+		} else {
+			progresschan <- -2
+		}
+		close(progresschan);
+	}(f)
+	
+	return
+}
 // transferCmd initializes a tranfer over the data connection.
 //
 // If the transfer is active, send a port command and the tranfer command
